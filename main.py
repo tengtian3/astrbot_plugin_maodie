@@ -8,34 +8,116 @@ import shutil
 from pathlib import Path
 import aiohttp
 import uuid
-from typing import List
+from typing import List, Optional
 
-@register("astrbot_plugin_maodie", "腾天", "耄耋来咯表情包插件", "1.0.0")
+@register("astrbot_plugin_maodie", "腾天", "耄耋来咯表情包插件", "1.1.0")
 class MaodiePlugin(Star):
     def __init__(self, context: Context):
         super().__init__(context)
         
-        # 创建表情包文件夹（在插件目录内）
+        # 创建表情包文件夹
         plugin_dir = Path(__file__).parent
         self.images_dir = plugin_dir / "maodie_images"
         self.images_dir.mkdir(exist_ok=True)
         
-        logger.info(f"表情包目录: {self.images_dir}")
+        logger.info(f"表情包插件初始化完成，目录: {self.images_dir}")
+
+    async def get_replied_message_images(self, event: AstrMessageEvent) -> List[str]:
+        """专门处理回复消息中的图片获取 - 改进版本"""
+        images = []
         
-        # 初始化默认表情包（如果文件夹为空）
-        self._init_default_images()
+        try:
+            # 获取回复消息的ID和图片信息
+            for msg_seg in event.message_obj.message:
+                logger.info(f"检查消息段: {type(msg_seg)} - {msg_seg}")
+                
+                # 检查是否是回复组件
+                if hasattr(msg_seg, 'type') and getattr(msg_seg, 'type', None) == Comp.ComponentType.Reply:
+                    reply_id = getattr(msg_seg, 'id', None)
+                    logger.info(f"从消息对象找到回复ID: {reply_id}")
+                    
+                    # 关键改进：直接从回复组件的chain中提取图片
+                    chain = getattr(msg_seg, 'chain', [])
+                    logger.info(f"回复组件包含chain: {chain}")
+                    
+                    for chain_item in chain:
+                        logger.info(f"检查chain_item: {type(chain_item)} - {chain_item}")
+                        
+                        # 检查是否是图片组件
+                        if hasattr(chain_item, 'type') and getattr(chain_item, 'type', None) == Comp.ComponentType.Image:
+                            image_url = getattr(chain_item, 'url', None)
+                            logger.info(f"找到图片URL: {image_url}")
+                            
+                            if image_url:
+                                images.append(image_url)
+                                logger.info(f"成功提取图片URL: {image_url}")
+                    
+                    break
+            
+            logger.info(f"从回复消息中总共找到 {len(images)} 张图片")
+            return images
+            
+        except Exception as e:
+            logger.error(f"获取回复消息图片失败: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
+            return []
 
-    def _init_default_images(self):
-        """初始化默认表情包"""
-        if not any(self.images_dir.iterdir()):
-            logger.info("表情包目录为空，将使用内置默认图片")
-            # 这里可以添加一些默认图片的URL供用户下载
-            # 实际部署时可以提供一些默认表情包
+    async def download_image(self, url: str) -> Optional[str]:
+        """下载单张图片"""
+        try:
+            # 生成唯一文件名
+            file_extension = '.jpg'
+            if '?' in url:
+                url_without_params = url.split('?')[0]
+                file_extension = Path(url_without_params).suffix or '.jpg'
+            else:
+                file_extension = Path(url).suffix or '.jpg'
+                
+            filename = f"{uuid.uuid4().hex}{file_extension}"
+            file_path = self.images_dir / filename
+            
+            logger.info(f"开始下载图片: {url}")
+            
+            async with aiohttp.ClientSession() as session:
+                # 特殊处理腾讯多媒体域名
+                if "multimedia.nt.qq.com.cn" in url:
+                    insecure_url = url.replace("https://", "http://", 1)
+                    logger.warning(f"检测到腾讯多媒体域名，使用 HTTP 协议下载: {insecure_url}")
+                    async with session.get(insecure_url) as response:
+                        if response.status == 200:
+                            content = await response.read()
+                        else:
+                            logger.error(f"下载失败，HTTP状态码: {response.status}")
+                            return None
+                else:
+                    async with session.get(url) as response:
+                        if response.status == 200:
+                            content = await response.read()
+                        else:
+                            logger.error(f"下载失败，HTTP状态码: {response.status}")
+                            return None
+                
+                logger.info(f"下载成功，文件大小: {len(content)} bytes")
+                
+                if len(content) > 50 * 1024 * 1024:  # 50MB限制
+                    logger.warning(f"图片过大，跳过下载: {len(content)} bytes")
+                    return None
+                    
+                with open(file_path, 'wb') as f:
+                    f.write(content)
+                logger.info(f"图片保存成功: {filename}")
+                return str(file_path)
+                        
+        except Exception as e:
+            logger.error(f"下载图片失败: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
+            return None
 
-    def get_random_image_path(self) -> str:
+    def get_random_image_path(self) -> Optional[str]:
         """随机获取一张表情包图片路径"""
         try:
-            # 获取所有图片文件
             image_extensions = {'.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp'}
             image_files = [
                 f for f in self.images_dir.iterdir() 
@@ -43,10 +125,8 @@ class MaodiePlugin(Star):
             ]
             
             if not image_files:
-                logger.warning("表情包目录中没有图片文件")
                 return None
                 
-            # 随机选择一张图片
             selected_image = random.choice(image_files)
             logger.info(f"随机选择图片: {selected_image.name}")
             return str(selected_image)
@@ -55,31 +135,27 @@ class MaodiePlugin(Star):
             logger.error(f"获取随机图片失败: {e}")
             return None
 
-    async def download_image(self, url: str) -> str:
-        """下载网络图片到表情包目录"""
+    def get_image_stats(self) -> dict:
+        """获取图片统计信息"""
         try:
-            # 生成唯一文件名
-            file_extension = Path(url).suffix
-            if not file_extension:
-                file_extension = '.jpg'
-                
-            filename = f"{uuid.uuid4().hex}{file_extension}"
-            file_path = self.images_dir / filename
+            image_extensions = {'.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp'}
+            image_files = [
+                f for f in self.images_dir.iterdir() 
+                if f.is_file() and f.suffix.lower() in image_extensions
+            ]
             
-            async with aiohttp.ClientSession() as session:
-                async with session.get(url) as response:
-                    if response.status == 200:
-                        with open(file_path, 'wb') as f:
-                            f.write(await response.read())
-                        logger.info(f"图片下载成功: {filename}")
-                        return str(file_path)
-                    else:
-                        logger.error(f"下载失败，HTTP状态码: {response.status}")
-                        return None
-                        
+            total_count = len(image_files)
+            total_size = sum(f.stat().st_size for f in image_files) / (1024 * 1024)  # MB
+            
+            return {
+                'total_count': total_count,
+                'total_size': total_size,
+                'recent_files': sorted(image_files, key=lambda x: x.stat().st_mtime, reverse=True)[:5]
+            }
+            
         except Exception as e:
-            logger.error(f"下载图片失败: {e}")
-            return None
+            logger.error(f"获取图片统计失败: {e}")
+            return {'total_count': 0, 'total_size': 0, 'recent_files': []}
 
     @filter.event_message_type(filter.EventMessageType.ALL)
     async def on_maodie_trigger(self, event: AstrMessageEvent):
@@ -87,15 +163,12 @@ class MaodiePlugin(Star):
         try:
             message_text = event.message_str.strip()
             
-            # 检查是否包含"哈个气"（忽略大小写和前后空格）
             if "哈个气" in message_text:
                 logger.info(f"用户 {event.get_sender_name()} 触发了耄耋来咯")
                 
-                # 获取随机表情包
                 image_path = self.get_random_image_path()
                 
                 if image_path:
-                    # 构建消息链：文本 + 图片
                     chain = [
                         Comp.Plain("耄耋来咯～"),
                         Comp.Image.fromFileSystem(image_path)
@@ -109,60 +182,64 @@ class MaodiePlugin(Star):
 
     @filter.command("添加表情包")
     async def add_sticker(self, event: AstrMessageEvent):
-        """添加表情包到收藏"""
+        """添加表情包到收藏 - 专门处理引用图片的情况"""
         try:
-            # 检查消息中是否有图片
-            image_url = None
-            for msg_seg in event.message_obj.message:
-                if hasattr(msg_seg, 'type') and msg_seg.type == 'image':
-                    image_url = msg_seg.data.get('url')
-                    break
+            # 专门处理回复消息中的图片
+            image_urls = await self.get_replied_message_images(event)
             
-            if not image_url:
-                yield event.plain_result("请发送包含图片的消息来添加表情包")
-                return
+            if not image_urls:
+                # 也检查当前消息中是否有图片（直接发送图片的情况）
+                current_images = []
+                for msg_seg in event.message_obj.message:
+                    logger.info(f"检查当前消息段: {type(msg_seg)} - {msg_seg}")
+                    # 检查是否是图片组件
+                    if hasattr(msg_seg, 'type') and getattr(msg_seg, 'type', None) == Comp.ComponentType.Image:
+                        image_url = getattr(msg_seg, 'url', None)
+                        if image_url:
+                            current_images.append(image_url)
+                            logger.info(f"从当前消息找到图片: {image_url}")
+                
+                if not current_images:
+                    yield event.plain_result("请引用包含图片的消息来添加表情包")
+                    return
+                else:
+                    image_urls = current_images
             
             # 下载图片
-            saved_path = await self.download_image(image_url)
+            saved_paths = []
+            for image_url in image_urls:
+                saved_path = await self.download_image(image_url)
+                if saved_path:
+                    saved_paths.append(saved_path)
             
-            if saved_path:
-                yield event.plain_result("表情包添加成功！🎉")
+            if saved_paths:
+                yield event.plain_result(f"表情包添加成功！🎉 共添加了 {len(saved_paths)} 张图片")
             else:
                 yield event.plain_result("表情包添加失败，请重试")
                 
         except Exception as e:
             logger.error(f"添加表情包失败: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
             yield event.plain_result("添加表情包时发生错误")
 
     @filter.command("表情包列表")
     async def list_stickers(self, event: AstrMessageEvent):
         """显示表情包列表"""
         try:
-            image_extensions = {'.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp'}
-            image_files = [
-                f for f in self.images_dir.iterdir() 
-                if f.is_file() and f.suffix.lower() in image_extensions
-            ]
+            stats = self.get_image_stats()
             
-            if not image_files:
+            if stats['total_count'] == 0:
                 yield event.plain_result("暂无表情包，使用『添加表情包』命令来添加吧！")
                 return
             
-            # 统计信息
-            total_count = len(image_files)
-            file_sizes = [f.stat().st_size for f in image_files]
-            total_size = sum(file_sizes) / (1024 * 1024)  # 转换为MB
-            
             # 构建回复消息
             result = f"📦 表情包统计:\n"
-            result += f"📊 总数: {total_count} 张\n"
-            result += f"💾 占用空间: {total_size:.2f} MB\n"
-            result += f"📁 存储路径: {self.images_dir}\n\n"
+            result += f"📊 总数: {stats['total_count']} 张\n"
+            result += f"💾 占用空间: {stats['total_size']:.2f} MB\n\n"
             result += "最近添加的5张表情包:\n"
             
-            # 按修改时间排序，显示最新的5个
-            recent_files = sorted(image_files, key=lambda x: x.stat().st_mtime, reverse=True)[:5]
-            for i, file in enumerate(recent_files, 1):
+            for i, file in enumerate(stats['recent_files'], 1):
                 file_size_kb = file.stat().st_size / 1024
                 result += f"{i}. {file.name} ({file_size_kb:.1f} KB)\n"
             
@@ -177,25 +254,21 @@ class MaodiePlugin(Star):
     async def clear_stickers(self, event: AstrMessageEvent):
         """清理所有表情包（仅管理员）"""
         try:
-            # 统计清理前的文件数量
-            image_extensions = {'.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp'}
-            image_files = [
-                f for f in self.images_dir.iterdir() 
-                if f.is_file() and f.suffix.lower() in image_extensions
-            ]
+            stats = self.get_image_stats()
             
-            if not image_files:
+            if stats['total_count'] == 0:
                 yield event.plain_result("没有表情包可清理")
                 return
             
             # 删除所有图片文件
             deleted_count = 0
-            for file_path in image_files:
-                try:
-                    file_path.unlink()
-                    deleted_count += 1
-                except Exception as e:
-                    logger.error(f"删除文件失败 {file_path}: {e}")
+            for file_path in self.images_dir.iterdir():
+                if file_path.is_file():
+                    try:
+                        file_path.unlink()
+                        deleted_count += 1
+                    except Exception as e:
+                        logger.error(f"删除文件失败 {file_path}: {e}")
             
             logger.info(f"清理了 {deleted_count} 个表情包文件")
             yield event.plain_result(f"已清理 {deleted_count} 个表情包文件")

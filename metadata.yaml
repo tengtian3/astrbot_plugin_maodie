@@ -1,7 +1,7 @@
 name: "astrbot_plugin_maodie"
 author: "腾天"
 description: "耄耋来咯表情包插件 - 发送'哈个气'触发随机表情包"
-version: "1.0.0"
+version: "1.1.0"
 tags: ["娱乐", "表情包"]
 license: "MIT"
 python_version: ">=3.8"
